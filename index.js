@@ -16,7 +16,8 @@ global.connection = new jsforce.Connection(config);
 global.sequelize = new Sequelize({
     dialect: 'sqlite',
     // storage: '/mnt/c/Users/matthew.mitchener/Development/NodeJS/sfdbsync/test.db'
-    storage: 'C:\\Users\\matthew.mitchener\\Development\\NodeJS\\sfdbsync\\test.db'
+    storage: 'C:\\Users\\matthew.mitchener\\Development\\NodeJS\\sfdbsync\\test.db',
+    logging: false
 });
 global.schemaMapper = new SchemaMapper();
 queryGenerator = new QueryGenerator();
@@ -41,7 +42,11 @@ global.connection.login(username, password + securityToken)
 //     .catch(handleError);
 
 function handleError(result) {
-    console.error(result);
+    if(result.stack) {
+        console.error(result.stack);
+    } else {
+        console.error(result);
+    }
 }
 
 function sync() {
@@ -63,6 +68,11 @@ function getSObjects() {
 function describeSObjects(sobjects) {
     return Promise.all(sobjects.map(sobject => {
         if(!sobject.queryable) return;
+        if(sobject.name.includes('__kav')) return;
+        if(sobject.name === 'CollaborationGroupRecord') return;
+        if(sobject.name === 'ContentFolderMember') return;
+        if(sobject.name === 'KnowledgeArticleVersion') return;
+        if(sobject.name === 'ContentDocumentLink') return;
         return getFields(sobject.name)
             .then(fields => {
                 return createTable(sobject.name, fields)
@@ -120,22 +130,75 @@ function getLastModifiedDate(objectSchema) {
             {
                 SystemModStamp : {
                     type: Sequelize.STRING
+                },
+                lastModifiedDate : {
+                    type: Sequelize.STRING
+                },
+                CreatedDate : {
+                    type: Sequelize.STRING
                 }
-            }, {timestamps: false, freezeTableName: true});
+            },
+            {
+                timestamps: false,
+                freezeTableName: true
+            });
 
-        ObjectModel.max('SystemModStamp')
-            .then(lastModifiedDate => {
-                objectSchema.lastModifiedDate = lastModifiedDate;
-                resolve(objectSchema);
+        return getMaxTimeStamp(ObjectModel, 'SystemModStamp')
+            .then(timeStampObject => {
+                objectSchema.timeStamp = timeStampObject;
+                resolve(objectSchema)
             })
-            .catch(handleError);
+            .catch(error => {
+                if(error.noColumn) {
+                    return getMaxTimeStamp(ObjectModel, 'LastModifiedDate')
+                        .then(timeStampObject => {
+                            objectSchema.timeStamp = timeStampObject;
+                            resolve(objectSchema);
+                        })
+                        .catch(error => {
+                            if(error.noColumn) {
+                                return getMaxTimeStamp(ObjectModel, 'CreatedDate')
+                                    .then(timeStampObject => {
+                                        objectSchema.timeStamp = timeStampObject;
+                                        resolve(objectSchema);
+                                    })
+                                    .catch(error => reject(error));
+                            } else {
+                                reject(error);
+                            }
+                        });
+                } else {
+                    reject(error.error);
+                }
+            });
+    });
+}
+
+function getMaxTimeStamp(ObjectModel, fieldName) {
+    return new Promise((resolve, reject) => {
+        ObjectModel.max(fieldName)
+            .then(lastModifiedDate => {
+                if(!lastModifiedDate) lastModifiedDate = '1900-01-01T00:00:00Z';
+                let timeStampObject = {
+                    "fieldName": "SystemModStamp",
+                    "time": lastModifiedDate
+                };
+                resolve(timeStampObject);
+            })
+            .catch(error => {
+                if(error === 'DatabaseError: SQLITE_ERROR: no such column:' + fieldName) {
+                    reject({"noColumn":true});
+                } else {
+                    reject({"noColumn":false, "message":error});
+                }
+            });
     });
 }
 
 function getSalesforceRecords(objectSchema) {
     return new Promise((resolve, reject) => {
         let queryString = queryGenerator.generate(objectSchema);
-        console.log(queryString);
+        // console.log(queryString);
 
         global.connection.query(queryString)
             .then(result => {
@@ -170,7 +233,6 @@ function syncRecords(records) {
             .then(result => {
                 global.sequelize.queryInterface.bulkInsert(objectName, records)
                     .then(result => {
-                        console.log(result);
                         resolve(result);
                     })
             })
