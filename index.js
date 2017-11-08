@@ -2,7 +2,6 @@ const Sequelize = require('sequelize');
 const SchemaMapper = require('./schemaMapper.js');
 const QueryGenerator = require('./queryGenerator.js');
 const jsforce = require('jsforce');
-const teamObject = require('./salesforce/objects/team.json');
 
 const config = {
     loginUrl: process.env.LOGIN_URL
@@ -12,6 +11,51 @@ const username = process.env.SF_USERNAME;
 const password = process.env.PASSWORD;
 const securityToken = process.env.SECURITY_TOKEN;
 
+const excludedTables = [
+    'RecentlyViewed',
+    'CollaborationGroupRecord',
+    'ContentFolderMember',
+    'KnowledgeArticleVersion',
+    'ContentDocumentLink',
+    'AuraDefinitionBundleInfo',
+    'DataType',
+    'ContentFolderLink',
+    'CronJobDetail',
+    'DashboardComponent',
+    'IdpEventLog',
+    'DatacloudAddress',
+    'EmbeddedServiceDetail',
+    'EventBusSubscriber',
+    'ForecastingUserPreference',
+    'KnowledgeArticleViewStat',
+    'DataStatistics',
+    'EntityParticle',
+    'FlexQueueItem',
+    'Publisher',
+    'KnowledgeArticleVoteStat',
+    'ListViewChartInstance',
+    'FeedAttachment',
+    'PicklistValueInfo',
+    'OwnerChangeOptionInfo',
+    'RelationshipInfo',
+    'RelationshipDomain',
+    'UserRecordAccess',
+    'UserFieldAccess',
+    'ApexPageInfo',
+    'UserEntityAccess',
+    'ThirdPartyAccountLink',
+    'UserAppMenuItem',
+    'LoginHistory',
+    'AuraDefinitionInfo',
+    'EntityDefinition'];
+
+const excludedFieldTypes = [
+    'location',
+    'complexvalue',
+    'address',
+    'datacategorygroupreference',
+    'anyType'];
+    
 global.connection = new jsforce.Connection(config);
 global.sequelize = new Sequelize({
     dialect: 'sqlite',
@@ -69,13 +113,18 @@ function describeSObjects(sobjects) {
     return Promise.all(sobjects.map(sobject => {
         if(!sobject.queryable) return;
         if(sobject.name.includes('__kav')) return;
-        if(sobject.name === 'CollaborationGroupRecord') return;
-        if(sobject.name === 'ContentFolderMember') return;
-        if(sobject.name === 'KnowledgeArticleVersion') return;
-        if(sobject.name === 'ContentDocumentLink') return;
+        if(sobject.name.includes('__ViewStat')) return;
+        if(sobject.name.includes('__VoteStat')) return;
+        if(sobject.name.includes('__mdt')) return;
+        if(excludedTables.includes(sobject.name)) return;
+        // if(sobjects[28] !== sobject) return;
+        // console.log(sobject.name);
         return getFields(sobject.name)
             .then(fields => {
                 return createTable(sobject.name, fields)
+            })
+            .then(objectSchema => {
+                return describeTable(objectSchema);
             })
             .then(objectSchema => {
                 return getLastModifiedDate(objectSchema);
@@ -106,10 +155,7 @@ function createTable(objectName, fields) {
             resolve();
         }
         fields.map(field => {
-            if(field.type === 'complexvalue') return;
-            if(field.type === 'address') return;
-            if(field.type === 'datacategorygroupreference') return;
-            if(field.type === 'anyType') return;
+            if(excludedFieldTypes.includes(field.type)) return;
             schemaFields[field.name] = schemaMapper.getColumnAttributes(field);
             return;
         });
@@ -120,77 +166,58 @@ function createTable(objectName, fields) {
                     "objectName" : objectName,
                     "fields" : Object.keys(schemaFields)})
             })
-            .catch(results => reject());
+            .catch(results => {
+                console.error('Create table error');
+                reject(results);
+            });
+    });
+}
+
+function describeTable(objectSchema) {
+    return new Promise((resolve, reject) => {
+        global.sequelize.queryInterface.describeTable(objectSchema.objectName)
+            .then(table => {
+                objectSchema.table = table;
+                resolve(objectSchema);
+            })
+            .catch(error => {
+                console.log('Describe Table issues')
+                reject(error)
+            });
     });
 }
 
 function getLastModifiedDate(objectSchema) {
     return new Promise((resolve, reject) => {
-        const ObjectModel = global.sequelize.define(objectSchema.objectName,
-            {
-                SystemModStamp : {
-                    type: Sequelize.STRING
-                },
-                lastModifiedDate : {
-                    type: Sequelize.STRING
-                },
-                CreatedDate : {
-                    type: Sequelize.STRING
-                }
-            },
-            {
-                timestamps: false,
-                freezeTableName: true
-            });
+        let fieldName = 'CreatedDate';
+        if(objectSchema.table.hasOwnProperty('SystemModstamp')) {
+            fieldName = 'SystemModstamp';
+        } else if(objectSchema.table.hasOwnProperty('LastModifiedDate')) {
+            fieldName = 'LastModifiedDate'
+        }
 
-        return getMaxTimeStamp(ObjectModel, 'SystemModStamp')
-            .then(timeStampObject => {
-                objectSchema.timeStamp = timeStampObject;
-                resolve(objectSchema)
-            })
-            .catch(error => {
-                if(error.noColumn) {
-                    return getMaxTimeStamp(ObjectModel, 'LastModifiedDate')
-                        .then(timeStampObject => {
-                            objectSchema.timeStamp = timeStampObject;
-                            resolve(objectSchema);
-                        })
-                        .catch(error => {
-                            if(error.noColumn) {
-                                return getMaxTimeStamp(ObjectModel, 'CreatedDate')
-                                    .then(timeStampObject => {
-                                        objectSchema.timeStamp = timeStampObject;
-                                        resolve(objectSchema);
-                                    })
-                                    .catch(error => reject(error));
-                            } else {
-                                reject(error);
-                            }
-                        });
-                } else {
-                    reject(error.error);
-                }
-            });
-    });
-}
+        let attributes = {};
+        attributes[fieldName] = {"type" : Sequelize.STRING};
 
-function getMaxTimeStamp(ObjectModel, fieldName) {
-    return new Promise((resolve, reject) => {
+        let options = {
+            "timestamps" : false,
+            "freezeTableName" : true
+        };
+
+        let ObjectModel = global.sequelize.define(objectSchema.objectName,attributes, options);
+
         ObjectModel.max(fieldName)
             .then(lastModifiedDate => {
                 if(!lastModifiedDate) lastModifiedDate = '1900-01-01T00:00:00Z';
                 let timeStampObject = {
-                    "fieldName": "SystemModStamp",
+                    "fieldName": fieldName,
                     "time": lastModifiedDate
                 };
-                resolve(timeStampObject);
+                objectSchema.timeStamp = timeStampObject;
+                resolve(objectSchema);
             })
             .catch(error => {
-                if(error === 'DatabaseError: SQLITE_ERROR: no such column:' + fieldName) {
-                    reject({"noColumn":true});
-                } else {
-                    reject({"noColumn":false, "message":error});
-                }
+                console.error(objectSchema.objectName + ': ' + fieldName);
             });
     });
 }
@@ -198,8 +225,6 @@ function getMaxTimeStamp(ObjectModel, fieldName) {
 function getSalesforceRecords(objectSchema) {
     return new Promise((resolve, reject) => {
         let queryString = queryGenerator.generate(objectSchema);
-        // console.log(queryString);
-
         global.connection.query(queryString)
             .then(result => {
                 if(result.done) {
@@ -235,8 +260,11 @@ function syncRecords(records) {
                     .then(result => {
                         resolve(result);
                     })
+                    .catch(result => {
+                        console.error(objectName + ': Bulk insert error');
+                        reject(result);
+                    })
             })
-            .catch(result => reject(result))
-
+            .catch(result => reject(result));
     });
 }
