@@ -3,7 +3,6 @@ const QueryGenerator = require('./queryGenerator.js');
 module.exports = class SalesforceRepository {
     constructor(connection) {
         this.connection = connection;
-        this.queryGenerator = new QueryGenerator();
     }
 
     authenticate (username, password, securityToken) {
@@ -32,7 +31,7 @@ module.exports = class SalesforceRepository {
 
     getRecords (objectSchema) {
         return new Promise((resolve, reject) => {
-            let queryString = this.queryGenerator.generate(objectSchema);
+            let queryString = QueryGenerator.generate(objectSchema);
             if(queryString.length > 20000) return reject('Query too long');
             this.connection.query(queryString)
                 .then(result => {

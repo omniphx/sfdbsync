@@ -1,5 +1,5 @@
 module.exports = class QueryGenerator {
-    generate (objectSchema) {
+    static generate (objectSchema) {
         let queryComponents = [];
         queryComponents.push('SELECT');
         queryComponents.push(objectSchema.fields.join(','));
